@@ -1,6 +1,7 @@
 // Client for the office bridge (server/bridge.ts).
 
 import type { BoardState, OfficeSnapshot, ThreadDetail, Issue } from "../shared/types.ts";
+import { demoDetail } from "./rt/demo.ts";
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
@@ -35,7 +36,8 @@ export const api = {
     open();
     return () => es?.close();
   },
-  detail: (id: string) => call<ThreadDetail>("GET", `/api/threads/${encodeURIComponent(id)}`),
+  detail: (id: string) =>
+    id.startsWith("demo-agent-") ? Promise.resolve(demoDetail(id)) : call<ThreadDetail>("GET", `/api/threads/${encodeURIComponent(id)}`),
   send: (id: string, text: string) => call("POST", `/api/threads/${encodeURIComponent(id)}/send`, { text, floorId: currentFloor }),
   archive: (id: string) => call("POST", `/api/threads/${encodeURIComponent(id)}/archive`, {}),
   layOff: (id: string, reason?: string) => call("POST", `/api/threads/${encodeURIComponent(id)}/layoff`, { by: "boss", reason }),
@@ -47,7 +49,7 @@ export const api = {
   hire: (body: { projectId: string; message: string; title?: string; desk?: number; model?: string; provider?: string }) =>
     call<{ threadId: string }>("POST", "/api/hire", { ...body, by: "boss" }),
   meeting: (threadIds: string[], text: string) => call<{ sent: number }>("POST", "/api/meeting", { threadIds, text }),
-  addProject: (path: string) => call("POST", "/api/projects", { path }),
+  addProject: (path: string, backend?: "t3" | "claude") => call("POST", "/api/projects", backend ? { path, backend } : { path }),
   recruitIntern: (body: { message?: string; model?: string; provider?: string }) =>
     call<{ threadId: string }>("POST", "/api/intern", { ...body, floorId: currentFloor }),
   ensurePm: (projectId: string) => call<{ threadId: string }>("POST", "/api/pm", { projectId }),

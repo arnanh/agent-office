@@ -130,6 +130,7 @@ export class InstancedPlacer {
           (material as THREE.MeshToonMaterial).color.set("#ffffff");
         }
         const inst = new THREE.InstancedMesh(part.geometry, material, used.length);
+        inst.userData.role = part.role; // the ray tracer picks finishes (chrome, oak, fabric...) by role
         const base = (part.material as THREE.MeshToonMaterial).color ?? new THREE.Color("#ffffff");
         used.forEach((p, i) => {
           inst.setMatrixAt(i, p.matrix);

@@ -491,7 +491,8 @@ export class OfficeChat {
     }
     flushSteps();
     for (const o of this.optimistic) nodes.push(this.userBubble(o.text, true));
-    if (!nodes.length) nodes.push(h("div", { class: "chat-note" }, `Say hi to ${name}. Messages go straight to their T3 Code thread.`));
+    const where = this.host.agents().find((x) => x.id === id)?.backend === "claude" ? "Claude Code session" : "T3 Code thread";
+    if (!nodes.length) nodes.push(h("div", { class: "chat-note" }, `Say hi to ${name}. Messages go straight to their ${where}.`));
     this.feed.replaceChildren(...nodes);
   }
 }

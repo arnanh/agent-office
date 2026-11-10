@@ -19,6 +19,10 @@ function officeBridge(): Plugin {
 
 export default defineConfig({
   plugins: [officeBridge()],
-  server: { port: PORT, strictPort: true, host: "127.0.0.1", open: true },
+  server: { port: PORT, strictPort: true, host: "127.0.0.1", open: !process.env.NO_OPEN },
   build: { target: "es2022", chunkSizeWarningLimit: 1200 },
+  // One copy of three for the app and three-mesh-bvh (the BVH's textures must be the app's three).
+  resolve: { dedupe: ["three"] },
+  // three-mesh-bvh stays unbundled so its BVH worker (new URL(..., import.meta.url)) resolves.
+  optimizeDeps: { include: ["three"], exclude: ["three-mesh-bvh"] },
 });

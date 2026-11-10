@@ -20,6 +20,10 @@ import { StaffModal } from "./ui/staff.ts";
 import { defaultBoardSettings } from "../shared/board.ts";
 import { OfficeChat } from "./ui/chat.ts";
 import { InternFollower } from "./world/intern.ts";
+import { RayTracer } from "./rt/renderer.ts";
+import { RTHud } from "./rt/hud.ts";
+import { addRaytracedDecor } from "./rt/decor.ts";
+import { DemoOffice } from "./rt/demo.ts";
 
 // ------------------------------------------------------------------ setup
 
@@ -80,6 +84,7 @@ const dayNight = new DayNight(city, { hemi, ambient, key: sun });
 const assetLib = new AssetLibrary(accentMaterial);
 await assetLib.preload(OFFICE_ASSETS);
 const office: Office = buildOffice(assetLib);
+const rtDecor = addRaytracedDecor(office); // neon and a chrome sculpture, before the nav grid reads the colliders
 scene.add(office.root);
 const nav = new NavGrid(office.colliders);
 prepareSeats();
@@ -94,6 +99,53 @@ let internRecruiting = 0;
 player.onLockError = () => {
   // Chrome refuses a re-capture for about a second after Esc; the click-to-play overlay covers that.
 };
+
+// Optional hybrid real-time ray tracing (src/rt). Off unless you tick it (or press G); the
+// original look is untouched while it's off, and nothing is built for it until it's first on.
+const rt = new RayTracer({
+  renderer,
+  scene,
+  camera,
+  cityGroup: city.group,
+  officeRoot: office.root,
+  sky: () => ({
+    sunDir: dayNight.env.sunDir,
+    sunElevation: dayNight.sunElevation,
+    moonDir: dayNight.env.moonDir,
+    moon: dayNight.env.moon,
+    night: dayNight.env.night,
+  }),
+  bloops: () => {
+    const list = [...bloops.values(), ...leaving, player.bloop];
+    return list.map((b) => ({ root: b.root, probe: (out) => b.rtProbe(out) }));
+  },
+  movingChairs: () => office.chairs?.moving() ?? [],
+  bakeKey: () => `${floorId}|${player.view}`,
+});
+const rtHud = new RTHud(rt, (on) => setRayTracing(on));
+function setRayTracing(on: boolean, remember = true) {
+  rt.enabled = on;
+  rtDecor.setVisible(on);
+  if (remember) {
+    try {
+      localStorage.setItem("office.rt", on ? "1" : "0");
+    } catch {
+      // private mode: just don't remember
+    }
+  }
+  rtHud.draw();
+}
+{
+  const q = new URLSearchParams(location.search).get("rt");
+  let saved: string | null = null;
+  try {
+    saved = localStorage.getItem("office.rt");
+  } catch {
+    // ignore
+  }
+  setRayTracing(q !== null ? q !== "0" : saved === "1", false);
+}
+(window as unknown as Record<string, unknown>).rt = rt;
 
 function resize() {
   const w = window.innerWidth;
@@ -249,11 +301,11 @@ const staff = new StaffModal({
 // ------------------------------------------------------------------ sound
 
 let audio: AudioContext | null = null;
-function chime(kind: "attention" | "done") {
+function chime(kind: "attention" | "done" | "ding") {
   if (muted) return;
   try {
     audio ??= new AudioContext();
-    const notes = kind === "done" ? [660, 880] : [880, 660, 880];
+    const notes = kind === "ding" ? [1318.5, 1046.5] : kind === "done" ? [660, 880] : [880, 660, 880];
     notes.forEach((f, i) => {
       const o = audio!.createOscillator();
       const g = audio!.createGain();
@@ -274,7 +326,7 @@ function chime(kind: "attention" | "done") {
 
 // ------------------------------------------------------------------ floors
 
-function goToFloor(id: string, opts: { instant?: boolean; then?: () => void } = {}) {
+function goToFloor(id: string, opts: { instant?: boolean; keepPlayer?: boolean; then?: () => void } = {}) {
   const doSwitch = () => {
     for (const b of bloops.values()) b.dispose();
     for (const b of leaving) b.dispose();
@@ -293,7 +345,8 @@ function goToFloor(id: string, opts: { instant?: boolean; then?: () => void } = 
     drawSign(office.sign.ctx, floorNumber(id), floorTitle(id), theme.accent);
     city.setElevation(floorElevation(id));
     office.sign.texture.needsUpdate = true;
-    player.teleport(PLAYER_START, PLAYER_START_YAW);
+    // Riding the lift you stay where you are (in the car); otherwise you arrive at reception.
+    if (!opts.keepPlayer) player.teleport(PLAYER_START, PLAYER_START_YAW);
     intern.arriveWithBoss();
     lastBoardKey = "";
     lastStaffKey = "";
@@ -308,6 +361,12 @@ function goToFloor(id: string, opts: { instant?: boolean; then?: () => void } = 
     setTimeout(() => fadeEl.classList.remove("on"), 120);
   }, 350);
 }
+
+/** Ride lift car `cab` to a floor: doors shut, the car moves, the floor changes under you, doors open. */
+function rideTo(cab: number, id: string) {
+  office.elevators.go(cab, { id, number: floorNumber(id), title: floorTitle(id) }, () => goToFloor(id, { instant: true, keepPlayer: true }));
+}
+office.elevators.onDing = () => chime("ding");
 
 function openElevator() {
   const floors = sortedFloors();
@@ -328,11 +387,13 @@ function openElevator() {
             class: `floor-btn ${p.id === floorId ? "current" : ""}`,
             onclick: () => {
               closeModal();
-              if (p.id !== floorId) goToFloor(p.id);
+              const cab = office.elevators.cabAt(player.position);
+              if (cab >= 0) rideTo(cab, p.id);
+              else if (p.id !== floorId) goToFloor(p.id);
             },
           },
           h("span", { class: "fnum", style: `background:${themeFor(p.id).accent}` }, `${floorNumber(p.id)}F`),
-          h("span", { class: "ftitle" }, h("strong", {}, p.title), h("small", {}, p.workspaceRoot)),
+          h("span", { class: "ftitle" }, h("strong", {}, p.title), h("small", {}, p.backend === "claude" ? `Claude Code · ${p.workspaceRoot}` : p.workspaceRoot)),
           h(
             "span",
             { class: "fstats" },
@@ -345,6 +406,15 @@ function openElevator() {
       }),
   );
   const pathIn = h("input", { placeholder: "/path/to/project", onkeydown: (e: KeyboardEvent) => e.stopPropagation() });
+  // Without T3 Code running, offer Claude Code first.
+  const t3Down = snapshot.backends ? !snapshot.backends.t3.ok : !snapshot.connected;
+  const backendIn = h(
+    "select",
+    { title: "Which app runs this floor's agents" },
+    h("option", { value: "t3" }, "T3 Code"),
+    h("option", { value: "claude" }, "Claude Code"),
+  ) as HTMLSelectElement;
+  backendIn.value = t3Down ? "claude" : "t3";
   const add = h(
     "form",
     {
@@ -353,7 +423,7 @@ function openElevator() {
         e.preventDefault();
         if (!pathIn.value.trim()) return;
         try {
-          await api.addProject(pathIn.value.trim());
+          await api.addProject(pathIn.value.trim(), backendIn.value === "claude" ? "claude" : undefined);
           toast("New floor built! It'll show up in the elevator in a moment.", "good");
           closeModal();
         } catch (err) {
@@ -362,9 +432,13 @@ function openElevator() {
       },
     },
     pathIn,
+    backendIn,
     h("button", { class: "btn", type: "submit" }, "🏗 Build floor"),
   );
-  openModal("Elevator", h("div", {}, h("p", { class: "muted" }, "Each floor is a T3 Code project."), list, h("h3", {}, "Open a new floor"), add));
+  openModal(
+    "Elevator",
+    h("div", {}, h("p", { class: "muted" }, "Each floor is a T3 Code project or a Claude Code folder."), list, h("h3", {}, "Open a new floor"), add),
+  );
 }
 
 // ------------------------------------------------------------------ agents on the floor
@@ -568,7 +642,10 @@ function onSnapshot(s: OfficeSnapshot) {
   const prev = snapshot;
   snapshot = s;
   bannerEl.classList.toggle("hidden", s.connected);
-  if (!s.connected) bannerEl.textContent = `Can't reach T3 Code (${s.error ?? "unknown error"}). Is the T3 Code app running?`;
+  if (!s.connected) {
+    bannerEl.textContent = `Can't reach T3 Code (${s.error ?? "unknown error"}). Is the T3 Code app running?`;
+    if (s.backends) bannerEl.textContent += " Or take the elevator (F) to open a Claude Code floor in any folder.";
+  }
 
   // Notifications for agents that just finished or need a hand.
   if (!firstSnapshot) {
@@ -614,7 +691,19 @@ function onSnapshot(s: OfficeSnapshot) {
   renderHud();
 }
 
-api.subscribe(onSnapshot, (ok) => connEl.classList.toggle("ok", ok));
+// ?demo=1 fills an empty office with demo agents (for trying the office or the ray tracer).
+const demo = new DemoOffice();
+let rawSnapshot: OfficeSnapshot | null = null;
+const feedSnapshot = () => {
+  if (rawSnapshot) onSnapshot(demo.wrap(rawSnapshot, feedSnapshot));
+};
+api.subscribe(
+  (s) => {
+    rawSnapshot = s;
+    feedSnapshot();
+  },
+  (ok) => connEl.classList.toggle("ok", ok),
+);
 
 // ------------------------------------------------------------------ HUD
 
@@ -695,7 +784,12 @@ function interactables(): Interactable[] {
     label: meeting ? "Meeting in progress (end it from the meeting panel)" : "Call a meeting",
     run: () => (meeting ? meeting.el.querySelector("textarea")?.focus() : openMeetingSetup()),
   });
-  list.push({ pos: ELEVATOR.panel, radius: 2.4, label: "Take the elevator", run: openElevator });
+  const inCar = office.elevators.cabAt(player.position) >= 0;
+  if (!inCar) list.push({ pos: ELEVATOR.panel, radius: 2.4, label: "Call the elevator", run: () => office.elevators.call(player.position) });
+  // Inside a car: aim at a floor button (see updatePrompt), or pick from the list.
+  else if (!office.elevators.riding) {
+    list.push({ pos: player.position.clone(), radius: 9, label: "Choose a floor", run: openElevator, weight: 50 });
+  }
   return list;
 }
 
@@ -723,6 +817,19 @@ function updatePrompt() {
       bestScore = -1;
     }
   }
+  // In a lift car, the floor button under the crosshair.
+  if (firstPerson && bestScore >= 0 && office.elevators.cabAt(player.position) >= 0 && !office.elevators.riding) {
+    raycaster.set(player.eye(), look);
+    raycaster.far = 2.5;
+    const pick = office.elevators.pick(raycaster);
+    raycaster.far = Infinity;
+    if (pick) {
+      const { cab, floor } = pick;
+      const here = floor.id === floorId;
+      best = { pos: player.position, radius: 9, label: here ? `You're on ${floor.number}F (opens the doors)` : `Go to ${floor.number}F · ${floor.title}`, run: () => rideTo(cab, floor.id) };
+      bestScore = -1;
+    }
+  } else office.elevators.clearHover();
   for (const it of interactables()) {
     if (bestScore < 0) break;
     const d = it.pos.distanceTo(player.position.clone().setY(it.pos.y));
@@ -779,6 +886,18 @@ window.addEventListener("keydown", (e) => {
     chat.focusComposer();
   } else if (e.code === "BracketLeft" || e.code === "BracketRight") {
     chat.cycle(e.code === "BracketLeft" ? -1 : 1);
+  } else if (e.code === "KeyG") {
+    setRayTracing(!rt.enabled);
+    toast(rt.enabled ? "⚡ Ray tracing on" : "Ray tracing off (original look)");
+  } else if (e.code === "KeyL" && rt.enabled) {
+    toast(`Lighting: ${rt.cycleMood()}`);
+    rtHud.draw();
+  } else if (e.code === "KeyX" && rt.enabled) {
+    rt.view = (rt.view + 1) % 5;
+    rtHud.draw();
+  } else if (e.code === "KeyN" && rt.enabled) {
+    rt.denoise = !rt.denoise;
+    rtHud.draw();
   }
 });
 
@@ -816,7 +935,9 @@ function openHire(desk: number) {
   if (!floorId) return;
   const pid = floorId;
   const models = new Map<string, string>();
-  for (const a of snapshot.agents) if (a.model && a.provider) models.set(`${a.provider}|${a.model}`, `${a.model} (${a.provider})`);
+  const claudeFloor = snapshot.projects.find((p) => p.id === pid)?.backend === "claude";
+  if (claudeFloor) for (const m of ["opus", "sonnet", "haiku"]) models.set(`claude-code|${m}`, `${m[0].toUpperCase()}${m.slice(1)} (Claude Code)`);
+  else for (const a of snapshot.agents) if (a.model && a.provider && a.backend !== "claude") models.set(`${a.provider}|${a.model}`, `${a.model} (${a.provider})`);
   const task = h("textarea", { rows: 5, placeholder: "What should they work on? This becomes their first message.", onkeydown: (e: KeyboardEvent) => e.stopPropagation() });
   const title = h("input", { placeholder: "Job title (optional, defaults to the task's first line)", onkeydown: (e: KeyboardEvent) => e.stopPropagation() });
   const model = h("select", {}, h("option", { value: "" }, "Project default model"), [...models].map(([v, l]) => h("option", { value: v }, l)));
@@ -1257,8 +1378,17 @@ function frame() {
   requestAnimationFrame(frame);
   const dt = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
+  office.elevators.setFloors(
+    sortedFloors()
+      .slice()
+      .reverse()
+      .map((p) => ({ id: p.id, number: floorNumber(p.id), title: p.title })),
+    floorId,
+  );
+  office.elevators.update(dt, [player.position, ...[...bloops.values()].map((b) => b.position), ...(intern.bloop ? [intern.bloop.position] : [])]);
   player.update(dt, office.colliders);
   player.updateCamera(camera, dt);
+  camera.position.y += office.elevators.cameraOffset;
   for (const [id, b] of bloops) {
     // Walk up to someone (or talk to them) and they swivel round in their chair to face you.
     if (b.mode === "sit" && !b.inMeeting) {
@@ -1326,7 +1456,9 @@ function frame() {
       renderInternButton();
     }
   }
-  renderer.render(scene, camera);
+  rtHud.update(dt);
+  if (rt.enabled) rt.render();
+  else renderer.render(scene, camera);
 }
 frame();
 
@@ -1352,4 +1484,5 @@ frame();
   seats: { pm: PM_SLOT, manager: MANAGER_SLOT, meeting: MEETING_SEATS, hangouts: HANGOUTS },
   staff,
   chairs: office.chairs,
+  elevators: office.elevators,
 };

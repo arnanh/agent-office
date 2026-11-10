@@ -7,7 +7,6 @@
 
 import { randomUUID } from "node:crypto";
 import type { Store } from "./store.ts";
-import type { T3Client } from "./t3.ts";
 import { bloopName } from "../shared/names.ts";
 import { DESK_COUNT, MANAGER_DESK, PM_DESK, type AgentInfo, type OfficeSnapshot, type ProjectInfo, type StaffLogEntry } from "../shared/types.ts";
 
@@ -19,7 +18,10 @@ const NOTICE_BATCH_MS = 4000;
 
 export interface ManagerDeps {
   store: Store;
-  t3: T3Client;
+  /** Starts a thread on the floor's backend (a T3 Code thread, or a Claude Code session on a Claude Code floor). */
+  startThread: (opts: { projectId: string; message: string; title?: string; officeApi?: boolean }) => Promise<{ threadId: string }>;
+  /** Messages a thread on whichever backend it runs on. */
+  sendMessage: (threadId: string, text: string) => Promise<unknown>;
   publicUrl: () => string;
   snapshot: () => OfficeSnapshot;
   /** Whether the thread is currently in the office (not archived or laid off). */
@@ -35,7 +37,7 @@ export function displayName(a: Pick<AgentInfo, "id" | "isPm" | "isManager">) {
 }
 
 export function createManager(deps: ManagerDeps) {
-  const { store, t3, httpError } = deps;
+  const { store, httpError } = deps;
   const base = () => deps.publicUrl();
   const lastActivity = new Map<string, AgentInfo["activity"]>();
   const pendingNotices = new Map<string, { agents: AgentInfo[]; timer: ReturnType<typeof setTimeout> }>();
@@ -140,7 +142,7 @@ export function createManager(deps: ManagerDeps) {
     });
     const text = `[Office update: this is the office, not the boss]\n\n${lines.join("\n\n")}\n\nRead more with curl -s '${base()}/api/threads/<id>'. Decide what's next: more work for them, a short report to the boss, or firing them if they're no longer needed.`;
     try {
-      await t3.sendMessage(mgr, text);
+      await deps.sendMessage(mgr, text);
     } catch (error) {
       console.warn(`[manager] couldn't notify ${mgr}: ${(error as Error).message}`);
     }
@@ -190,6 +192,10 @@ export function createManager(deps: ManagerDeps) {
 
   function guide(projectId: string) {
     const b = base();
+    const claude = deps.snapshot().projects.find((x) => x.id === projectId)?.backend === "claude";
+    const fire = claude
+      ? "stops them if they're mid-task and takes them out of the office (their Claude Code session and transcript stay), frees the desk"
+      : "stops them if they're mid-task, settles their thread in T3 (not deleted, the boss can bring them back), frees the desk";
     const json = `-H 'content-type: application/json'`;
     return `Floor manager API for project ${projectId} (JSON over HTTP, use curl). Pass "by":"manager" whenever you hire or fire.
 - Roster: everyone on the floor (id, name, title, role, activity, desk, minutes since last active, last message, tickets):
@@ -201,7 +207,7 @@ export function createManager(deps: ManagerDeps) {
     Optional: "desk": 0-${DESK_COUNT - 1}, "model", "provider". Long briefs are easiest as a heredoc: curl ... --data-binary @- <<'EOF' {...} EOF
 - Message or delegate to agents (they see it's from you; "to" is an id, a list of ids, or "all" for the whole floor except you):
     curl -s -X POST ${b}/api/manager/message ${json} -d '{"projectId":"${projectId}","to":["<id>"],"text":"..."}'
-- Fire an agent: stops them if they're mid-task, settles their thread in T3 (not deleted, the boss can bring them back), frees the desk:
+- Fire an agent: ${fire}:
     curl -s -X POST ${b}/api/threads/<id>/layoff ${json} -d '{"by":"manager","reason":"<one line>"}'
 - Hiring and firing history for this floor:
     curl -s '${b}/api/staff/log?projectId=${projectId}'
@@ -212,7 +218,7 @@ When an agent you hired or messaged stops working (finished or hit an error), th
 
   function brief(p: ProjectInfo) {
     const pm = store.data.pm[p.id];
-    return `You are the Floor Manager of the "${p.title}" floor in Agent Office, a 3D office where coding agents (T3 Code threads) work at desks, one floor per project. Project folder: ${p.workspaceRoot}. Project id: ${p.id}. You have the corner office, and you're the one with role "manager" in the roster.
+    return `You are the Floor Manager of the "${p.title}" floor in Agent Office, a 3D office where coding agents (${p.backend === "claude" ? "Claude Code sessions" : "T3 Code threads"}) work at desks, one floor per project. Project folder: ${p.workspaceRoot}. Project id: ${p.id}. You have the corner office, and you're the one with role "manager" in the roster.
 
 Your job is to run this floor's team for the boss. You don't write or change project code yourself: you delegate.
 - Staffing: turn the boss's requests into well-scoped tasks. Give each to an idle agent whose title fits, or hire a new agent for it. Write every brief for a capable engineer who hasn't seen this conversation: the goal, where to look in the code, constraints, how to check the work, and what "done" means. Give each new hire a short job title.
@@ -231,7 +237,7 @@ Start by checking the roster. Then greet the boss in one or two sentences (how m
     const p = project(projectId);
     const existing = managerOf(projectId);
     if (existing && deps.present(existing)) return existing;
-    const { threadId } = await t3.startThread({ projectId, message: brief(p), title: `Floor Manager · ${p.title}` });
+    const { threadId } = await deps.startThread({ projectId, message: brief(p), title: `Floor Manager · ${p.title}`, officeApi: true });
     store.data.managers[projectId] = threadId;
     record({ projectId, action: "hire", threadId, title: `Floor Manager · ${p.title}`, by: "boss", reason: null });
     store.save();
@@ -249,7 +255,7 @@ Start by checking the roster. Then greet the boss in one or two sentences (how m
     if (unknown.length) throw httpError(400, `Not on this floor: ${unknown.join(", ")}. Check the roster.`);
     const from = mgr ? `${bloopName(mgr)}, your floor manager` : "your floor manager";
     const body = `[Message from ${from}]\n\n${text.trim()}`;
-    const results = await Promise.allSettled(ids.map((id) => t3.sendMessage(id, body)));
+    const results = await Promise.allSettled(ids.map((id) => deps.sendMessage(id, body)));
     ids.forEach((id, i) => results[i].status === "fulfilled" && watchFor(projectId, id));
     deps.poll();
     const failed = ids.filter((_, i) => results[i].status === "rejected");

@@ -8,10 +8,14 @@ export const MANAGER_DESK = -2;
 
 export type Activity = "working" | "needs-input" | "done" | "error" | "idle";
 
+/** Where a floor's agents run. Missing means T3 Code. */
+export type Backend = "t3" | "claude";
+
 export interface ProjectInfo {
   id: string;
   title: string;
   workspaceRoot: string;
+  backend?: Backend;
 }
 
 export interface AgentInfo {
@@ -36,6 +40,7 @@ export interface AgentInfo {
   isManager: boolean;
   /** The boss's intern: no desk, follows the boss from floor to floor. */
   isIntern: boolean;
+  backend?: Backend;
 }
 
 /** A ticket's column id (see BoardSettings.columns). "" means it fits no column. */
@@ -118,6 +123,11 @@ export interface OfficeSnapshot {
   /** Board settings per project id. */
   boards: Record<string, BoardState>;
   bridgeUrl: string;
+  /** Health of each agent backend (absent from older bridges). */
+  backends?: {
+    t3: { ok: boolean; error: string | null };
+    claude: { ok: boolean; error: string | null; floors: number };
+  };
 }
 
 /** Who did a hire or a firing: "boss" (you, in the office), "manager", "pm", or another label. */

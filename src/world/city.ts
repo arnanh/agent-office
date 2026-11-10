@@ -14,6 +14,7 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { canvasTexture, flat, hashString, mesh, toon } from "./toon.ts";
 import { CEILING_HEIGHT, FLOOR_TO_FLOOR, WINDOW_HEAD, WINDOW_SILL } from "./floorplan.ts";
+import { NIGHT_SKY_GLSL, NightSky, nightSkyUniforms } from "./nightsky.ts";
 
 /** Time-of-day lighting for the city, produced by DayNight. */
 export interface CityEnv {
@@ -28,6 +29,8 @@ export interface CityEnv {
   /** Visibility 0..1. */
   moon: number;
   stars: number;
+  /** Rotation from galactic coordinates to city space for the real sky right now (see nightsky.ts). */
+  celestial: THREE.Matrix4;
   /** Multiplies every lit city material (white in daylight). */
   tint: THREE.Color;
   hills: THREE.Color;
@@ -49,6 +52,8 @@ export interface City {
   towerAbove: THREE.Object3D;
   /** Recommended camera far plane so the skyline and hills are not clipped. */
   cameraFar: number;
+  /** Stars, Milky Way and shooting stars (e.g. nightSky.spawn(true) for a fireball). */
+  nightSky: NightSky;
 }
 
 // ------------------------------------------------------------------ constants
@@ -1529,8 +1534,10 @@ export function buildCity(): City {
   }
 
   // ---------------------------------------------------------------- sky dome
+  const nightUniforms = nightSkyUniforms();
   const skyMat = new THREE.ShaderMaterial({
     uniforms: {
+      ...nightUniforms,
       top: { value: new THREE.Color("#6faae6") },
       mid: { value: new THREE.Color("#a9cdf0") },
       horizon: { value: new THREE.Color(HORIZON) },
@@ -1554,11 +1561,7 @@ export function buildCity(): City {
       uniform float glowAmt; uniform vec3 sunDir; uniform vec3 moonDir;
       uniform float moon; uniform float stars; uniform float uTime;
       varying vec3 vDir;
-      float hash13(vec3 p) {
-        p = fract(p * 0.1031);
-        p += dot(p, p.zyx + 31.32);
-        return fract((p.x + p.y) * p.z);
-      }
+      ${NIGHT_SKY_GLSL}
       void main() {
         vec3 d = normalize(vDir);
         float h = d.y;
@@ -1573,17 +1576,10 @@ export function buildCity(): City {
         float up = smoothstep(-0.06, 0.02, sunDir.y);
         c += warm * pow(sd, 90.0) * 0.5 * up;
         c = mix(c, vec3(1.0, 0.95, 0.82), smoothstep(0.99955, 0.9997, sd) * up);
-        // Stars: one candidate per cell of a 3D grid, sampled where the view ray meets the sphere.
+        // The Milky Way and shooting stars (the stars themselves are points; see nightsky.ts).
         if (stars > 0.0 && h > 0.0) {
-          vec3 p = d * 260.0;
-          vec3 cell = floor(p);
-          float r = hash13(cell);
-          if (r > 0.95) {
-            vec3 sp = cell + 0.5 + 0.4 * (vec3(hash13(cell + 1.7), hash13(cell + 3.1), hash13(cell + 5.3)) - 0.5);
-            float twinkle = 0.7 + 0.3 * sin(uTime * (1.3 + r * 3.0) + r * 60.0);
-            float b = smoothstep(0.42, 0.0, length(p - sp)) * twinkle * (0.35 + 0.65 * hash13(cell + 9.1));
-            c += vec3(0.95, 0.97, 1.0) * b * stars * smoothstep(0.03, 0.25, h);
-          }
+          if (uGalaxy > 0.0) c += milkyWay(d) * uGalaxy * 0.24 * smoothstep(0.02, 0.38, h);
+          c += meteors(d) * smoothstep(0.0, 0.08, h);
         }
         // The moon, lit from the sun's direction so it shows the right phase.
         float md = dot(d, moonDir);
@@ -1614,6 +1610,11 @@ export function buildCity(): City {
   sky.renderOrder = -1000;
   sky.frustumCulled = false;
   sky.name = "sky";
+  const nightSky = new NightSky(nightUniforms);
+  sky.add(nightSky.stars);
+  sky.onBeforeRender = (renderer, _scene, camera) => {
+    if (skyMat.uniforms.stars.value > 0) nightSky.beforeSkyRender(renderer, camera);
+  };
 
   // ---------------------------------------------------------------- trees (instanced)
   function treeTemplate(kind: "round" | "pine") {
@@ -1992,6 +1993,7 @@ export function buildCity(): City {
     u.moonDir.value.copy(env.moonDir);
     u.moon.value = env.moon;
     u.stars.value = env.stars;
+    nightSky.setSky(env.stars, env.celestial, env.moonDir, env.moon);
     fog.color.copy(env.horizon);
     background.copy(env.horizon);
     for (const m of litMats) m.color.copy(env.tint);
@@ -2007,6 +2009,7 @@ export function buildCity(): City {
   let wheelAngle = 0;
   function update(dt: number, time: number) {
     skyMat.uniforms.uTime.value = time;
+    nightSky.update(dt, time);
     if (nightLevel > 0.01) {
       // Beacons blink together, about once every two seconds; the lighthouse pulses.
       beacons.m.opacity = nightLevel * (time % 2 < 0.35 ? 1 : 0.08);
@@ -2030,5 +2033,5 @@ export function buildCity(): City {
   const ms = performance.now() - t0;
   if (import.meta.env?.DEV) console.debug(`[city] built in ${ms.toFixed(0)} ms, ${buildings.length} buildings, ${cars.length} cars, ${(roundTrees.length + pineTrees.length) / 5} trees`);
 
-  return { group, fog, background, setElevation, update, applyEnv, towerAbove, cameraFar: CAMERA_FAR };
+  return { group, fog, background, setElevation, update, applyEnv, towerAbove, cameraFar: CAMERA_FAR, nightSky };
 }

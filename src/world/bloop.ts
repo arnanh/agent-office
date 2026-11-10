@@ -45,6 +45,7 @@ const GEO = {
 };
 
 const BODY_Y = 0.42;
+const GLOSSY = { rough: 0.16, f0: 0.05 };
 /** Height of the bottom of the body above the root (feet level). */
 const BODY_BOTTOM = BODY_Y - 0.32 * 1.08;
 /** Default seat-cushion height when a seat doesn't say. */
@@ -103,6 +104,7 @@ export class Bloop {
   private mouthO: THREE.Mesh;
   private bulb: THREE.Mesh;
   private bulbMat: THREE.MeshBasicMaterial;
+  private body: THREE.Mesh;
   private antenna = new THREE.Group();
   private boxGroup = new THREE.Group();
   private path: THREE.Vector3[] = [];
@@ -141,8 +143,11 @@ export class Bloop {
 
     const body = mesh(GEO.body, bodyMat, { pos: [0, BODY_Y, 0] });
     body.scale.set(1, 1.08, 0.95);
+    body.userData.rt = GLOSSY; // candy-coated vinyl toys in the ray tracer
+    this.body = body;
     this.pivot.add(body);
     const belly = mesh(GEO.body, bellyMat, { pos: [0, BODY_Y - 0.08, 0.13], shadow: false });
+    belly.userData.rt = GLOSSY;
     belly.scale.set(0.62, 0.58, 0.6);
     this.pivot.add(belly);
 
@@ -150,7 +155,9 @@ export class Bloop {
     for (const side of [-1, 1]) {
       const eye = new THREE.Group();
       eye.position.set(side * 0.115, BODY_Y + 0.08, 0.255);
-      eye.add(mesh(GEO.eye, toon("#ffffff"), { shadow: false }));
+      const white = mesh(GEO.eye, toon("#ffffff"), { shadow: false });
+      white.userData.rt = { rough: 0.05, f0: 0.06 };
+      eye.add(white);
       const pupil = mesh(GEO.pupil, flat("#262838"), { pos: [0, 0, 0.05], shadow: false });
       eye.add(pupil);
       eye.add(mesh(GEO.glint, flat("#ffffff"), { pos: [-0.018, 0.025, 0.098], shadow: false }));
@@ -171,6 +178,7 @@ export class Bloop {
     this.antenna.add(mesh(GEO.antenna, toon("#55576a"), { pos: [0, 0.1, 0], shadow: false }));
     this.bulbMat = new THREE.MeshBasicMaterial({ color: ACTIVITY_COLORS.idle });
     this.bulb = mesh(GEO.bulb, this.bulbMat, { pos: [0, 0.22, 0], shadow: false });
+    this.bulb.userData.rt = { emissive: 4, group: 5 }; // a real light in the ray tracer (renderer.ts adds it)
     this.antenna.add(this.bulb);
     this.pivot.add(this.antenna);
 
@@ -693,5 +701,16 @@ export class Bloop {
 
   dispose() {
     this.root.removeFromParent();
+  }
+
+  /** For the ray tracer: the body as a sphere and the status bulb, in world space. */
+  rtProbe(out: { body: THREE.Vector3; radius: number; color: THREE.Color; rough: number; bulb: THREE.Vector3; bulbOn: boolean; bulbColor: THREE.Color }) {
+    this.body.getWorldPosition(out.body);
+    out.radius = 0.32 * this.root.scale.x;
+    out.color.copy((this.body.material as THREE.MeshToonMaterial).color);
+    out.rough = GLOSSY.rough;
+    this.bulb.getWorldPosition(out.bulb);
+    out.bulbOn = this.antenna.visible && this.bulb.visible;
+    out.bulbColor.copy(this.bulbMat.color);
   }
 }

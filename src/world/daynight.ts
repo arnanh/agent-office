@@ -8,10 +8,12 @@
 // Overrides, handy for testing:
 //   ?time=21:30            pin the clock to a time of day (today's date)
 //   ?timescale=600         run the clock 600x faster (a day in about 2.4 minutes)
-//   office.dayNight.setTime("6:45") / setTime(null) from the browser console
+//   dayNight.setTime("6:45") / setTime(null) from the browser console
+//   dayNight.nightSky.spawn() launches a shooting star (spawn(true): a fireball)
 
 import * as THREE from "three";
 import type { City, CityEnv } from "./city.ts";
+import { galacticToCity } from "./nightsky.ts";
 
 export interface OfficeLights {
   hemi: THREE.HemisphereLight;
@@ -131,7 +133,7 @@ function sunDirection(date: Date, lat: number, lon: number, out: THREE.Vector3) 
   const gmst = (((18.697374558 + 24.06570982441908 * d) % 24) + 24) % 24;
   const H = (gmst * 15 + lon) * RAD - ra;
   enu(H, dec, lat * RAD, out);
-  return { H, dec };
+  return { H, dec, lst: (gmst * 15 + lon) * RAD };
 }
 
 /** East/up/north unit vector for an hour angle and declination, mapped to city axes. */
@@ -165,7 +167,7 @@ interface Key {
 
 // Ordered by elevation. Day matches the original look of the city exactly.
 const KEYS: Key[] = [
-  { el: -18, top: "#050a1a", mid: "#0a1430", horizon: "#16203c", glow: "#16203c", glowAmt: 0, tint: "#2a3150", hills: "#1a2236", clouds: "#2b3352" },
+  { el: -18, top: "#010106", mid: "#030714", horizon: "#16203c", glow: "#16203c", glowAmt: 0, tint: "#2a3150", hills: "#1a2236", clouds: "#1f2640" },
   { el: -10, top: "#0b1534", mid: "#1d2a58", horizon: "#3c3e6a", glow: "#8d5a7e", glowAmt: 0.35, tint: "#3a4068", hills: "#2c3350", clouds: "#4a4a70" },
   { el: -4, top: "#22407c", mid: "#5a6aa6", horizon: "#e99a7a", glow: "#ff8250", glowAmt: 0.75, tint: "#7c7290", hills: "#6a6688", clouds: "#d09aa8" },
   { el: 1, top: "#4a7fc2", mid: "#93acd6", horizon: "#ffc08a", glow: "#ff9a52", glowAmt: 0.8, tint: "#d8b6a0", hills: "#c2aca8", clouds: "#ffd0b8" },
@@ -203,6 +205,7 @@ export class DayNight {
     moonDir: new THREE.Vector3(0, -1, 0),
     moon: 0,
     stars: 0,
+    celestial: new THREE.Matrix4(),
     tint: new THREE.Color(),
     hills: new THREE.Color(),
     clouds: new THREE.Color(),
@@ -221,16 +224,21 @@ export class DayNight {
   private realStart = performance.now();
   private accum = Infinity;
 
-  private city: Pick<City, "applyEnv">;
+  private city: Pick<City, "applyEnv"> & Partial<Pick<City, "nightSky">>;
   private lights: OfficeLights;
 
-  constructor(city: Pick<City, "applyEnv">, lights: OfficeLights) {
+  constructor(city: Pick<City, "applyEnv"> & Partial<Pick<City, "nightSky">>, lights: OfficeLights) {
     this.city = city;
     this.lights = lights;
     const q = new URLSearchParams(location.search);
     if (q.has("time")) this.setTime(q.get("time"));
     if (q.has("timescale")) this.timescale = Math.max(0, Number(q.get("timescale")) || 1);
     this.update(0);
+  }
+
+  /** Stars, Milky Way and shooting stars, e.g. dayNight.nightSky.spawn(true) for a fireball. */
+  get nightSky() {
+    return this.city.nightSky;
   }
 
   /** Pin the clock to "HH:MM" (today), a Date, or hours as a number. null returns to live time. */
@@ -273,7 +281,7 @@ export class DayNight {
   private compute(date: Date) {
     const { lat, lon } = this.location;
     const env = this.env;
-    const { H, dec } = sunDirection(date, lat, lon, env.sunDir);
+    const { H, dec, lst } = sunDirection(date, lat, lon, env.sunDir);
     const el = Math.asin(THREE.MathUtils.clamp(env.sunDir.y, -1, 1)) / RAD;
     this.sunElevation = el;
 
@@ -297,6 +305,8 @@ export class DayNight {
     // Office windows stay dark by day, then come on one by one through dusk until about nautical dusk.
     env.windows = 1 - smooth(-12, 1, el);
     env.stars = 1 - smooth(-14, -3, el);
+    // The real night sky for this moment: the Milky Way where it is, turning through the night.
+    galacticToCity(lst, lat * RAD, env.celestial);
     this.daylight = smooth(-8, 10, el);
 
     // A plausible moon: it trails the sun by its phase, so it's full and opposite the sun mid-month.

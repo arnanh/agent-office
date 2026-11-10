@@ -141,7 +141,11 @@ export class AgentPanel {
         {
           class: "btn danger",
           onclick: () => {
-            if (confirm(`Lay off ${this.host.nameOf(agent.id)}? Their thread "${agent.title}" will be settled in T3 Code (not archived). Un-settle it there to bring them back.`)) {
+            const fate =
+              agent.backend === "claude"
+                ? `Their Claude Code session "${agent.title}" leaves the office (its transcript stays in Claude Code).`
+                : `Their thread "${agent.title}" will be settled in T3 Code (not archived). Un-settle it there to bring them back.`;
+            if (confirm(`Lay off ${this.host.nameOf(agent.id)}? ${fate}`)) {
               this.host.layOff(agent.id);
               this.close();
             }

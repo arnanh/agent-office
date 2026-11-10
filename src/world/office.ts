@@ -10,6 +10,7 @@ import { canvasTexture, flat, hashString, mesh, toon, toonUnique } from "./toon.
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { fitFootprint, InstancedPlacer, type AssetLibrary } from "./assets.ts";
 import { SwivelChairs } from "./chairs.ts";
+import { Elevators } from "./elevator.ts";
 
 /** Theme accent shared by procedural props and Blender assets ("accent*" materials). */
 export const accentMaterial = toonUnique("#6f9de0");
@@ -66,7 +67,23 @@ export interface Office {
   setCutaway(on: boolean): void;
   /** Swivelling desk chair tops (null when the chair models are missing). */
   chairs: SwivelChairs | null;
+  /** Everything vertical (scaled down in cutaway) and the ceiling (hidden in cutaway). */
+  walls: THREE.Group;
+  ceiling: THREE.Group;
+  /** The lifts: sliding doors, cars with floor buttons, the lobby directory. */
+  elevators: Elevators;
 }
+
+/** Floor finishes for the ray tracer: everything is sealed or polished, so it reflects. */
+const FLOOR_RT: Record<string, { rough: number; f0?: number }> = {
+  carpet: { rough: 0.3 },
+  "carpet-accent": { rough: 0.28 },
+  wood: { rough: 0.14, f0: 0.05 },
+  tile: { rough: 0.06, f0: 0.05 },
+  vinyl: { rough: 0.1, f0: 0.05 },
+  stone: { rough: 0.02, f0: 0.06 },
+  concrete: { rough: 0.35 },
+};
 
 export interface Theme {
   carpet: string;
@@ -177,6 +194,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
   const P = plan.PLATE;
   const base = mesh(new THREE.PlaneGeometry(P.maxX - P.minX + 1, P.maxZ - P.minZ + 1), toon("#d9d6cf"), { rot: [-Math.PI / 2, 0, 0], shadow: false });
   base.position.y = -0.01;
+  base.userData.rt = { rough: 0.4 };
   root.add(base);
   const wood = plankTexture();
   const tile = tileTexture("#f2efe8", "#e4e0d6");
@@ -210,6 +228,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
     const [x0, z0, x1, z1] = r.rect;
     const m = mesh(new THREE.PlaneGeometry(x1 - x0, z1 - z0), finishMat(r), { rot: [-Math.PI / 2, 0, 0], shadow: false });
     m.position.set((x0 + x1) / 2, 0.002, (z0 + z1) / 2);
+    m.userData.rt = FLOOR_RT[r.finish];
     root.add(m);
   }
 
@@ -220,6 +239,12 @@ export function buildOffice(lib?: AssetLibrary): Office {
   const mullionMat = toon("#6d7385");
   const doorMat = toon("#c99a6b");
   const metalDoorMat = toon("#b8bfcc");
+  // Ray tracer finishes: brushed-steel frames, mirror-polished lift doors.
+  frameMat.userData.rt = { metal: 1, rough: 0.45, color: "#c9ced8" };
+  mullionMat.userData.rt = { metal: 1, rough: 0.25, color: "#b4bac6" };
+  metalDoorMat.userData.rt = { metal: 1, rough: 0.07, color: "#d4d9e2" };
+  doorMat.userData.rt = { rough: 0.22 };
+  wallMat.userData.rt = { rough: 0.6 };
 
   function addCollider(x0: number, z0: number, x1: number, z1: number, t: number) {
     colliders.push({
@@ -314,11 +339,10 @@ export function buildOffice(lib?: AssetLibrary): Office {
       slab(w, s1 - 0.05, s1 + 0.02, 0, DOOR_H, t + 0.04, frameMat);
       slab(w, s0 - 0.02, s1 + 0.02, DOOR_H - 0.05, DOOR_H + 0.03, t + 0.04, frameMat);
 
-      const closed = o.kind === "elevator" || o.kind === "stair-door" || w.kind === "core";
+      // Lift doors slide and have a car behind them: see elevator.ts (which also owns their colliders).
+      const closed = o.kind !== "elevator" && (o.kind === "stair-door" || w.kind === "core");
       if (o.kind === "elevator") {
-        slab(w, s0, o.at, 0, DOOR_H, t * 0.6, metalDoorMat, 0);
-        slab(w, o.at, s1, 0, DOOR_H, t * 0.6, metalDoorMat, 0);
-        slab(w, o.at - 0.005, o.at + 0.005, 0, DOOR_H, t * 0.7, mullionMat, 0);
+        // nothing here
       } else if (closed) {
         slab(w, s0 + 0.02, s1 - 0.02, 0, DOOR_H - 0.02, 0.05, o.kind === "stair-door" ? metalDoorMat : doorMat, 0);
       } else {
@@ -350,6 +374,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
         for (const side of [1, -1]) {
           const [cx, cz] = at(o.at);
           const sign = new THREE.Mesh(G.box, flat("#2fbf71"));
+          sign.material.userData.rt = { emissive: 3, group: 6, light: true };
           sign.position.set(cx + dz * side * (t / 2 + 0.03), DOOR_H + 0.22, cz - dx * side * (t / 2 + 0.03));
           sign.rotation.y = Math.atan2(dx, dz) + Math.PI / 2;
           sign.scale.set(0.42, 0.16, 0.04);
@@ -381,6 +406,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
   const ceil = mesh(new THREE.PlaneGeometry(P.maxX - P.minX, P.maxZ - P.minZ), new THREE.MeshBasicMaterial({ map: tiles.texture, color: "#e4e1da" }), { rot: [Math.PI / 2, 0, 0], shadow: false });
   ceil.position.set(0, H, 0);
   ceil.receiveShadow = false;
+  ceil.userData.rt = { emissive: 0, rough: 0.9 };
   ceiling.add(ceil);
   const lightSpots: [number, number][] = [];
   for (let x = P.minX + 2.25; x < P.maxX - 1; x += 3) {
@@ -396,6 +422,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
     m4.compose(new THREE.Vector3(x, H - 0.01, z), q, new THREE.Vector3(1, 1, 1));
     panels.setMatrixAt(i, m4);
   });
+  panels.userData.rt = { emissive: 7, group: 1, light: true };
   ceiling.add(panels);
 
   // ---------------------------------------------------------------- desks
@@ -498,6 +525,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
     g.rotation.y = yaw;
     const face = new THREE.Mesh(new THREE.PlaneGeometry(b.width, b.height), new THREE.MeshBasicMaterial({ map: board.texture, toneMapped: false }));
     face.position.z = 0.02;
+    face.userData.rt = { emissive: 1.2, group: 6, light: true, liveMap: true };
     g.add(face);
     g.add(box(b.width + 0.12, b.height + 0.12, 0.03, frameMat, 0, 0, 0, false));
     g.add(box(b.width, 0.05, 0.12, toon("#c9ced9"), 0, -b.height / 2 - 0.06, 0.06, false));
@@ -535,6 +563,7 @@ export function buildOffice(lib?: AssetLibrary): Office {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.6), new THREE.MeshBasicMaterial({ map: sign.texture, toneMapped: false, transparent: true }));
     m.position.set(s.x, s.y, s.z);
     m.rotation.y = Math.atan2(s.facing[0], s.facing[1]);
+    m.userData.rt = { emissive: 2.5, group: 6 };
     walls.add(m);
     // call button panel
     const [px, pz] = plan.ELEVATOR_PANEL;
@@ -557,7 +586,8 @@ export function buildOffice(lib?: AssetLibrary): Office {
   }
 
   mergeStatic(walls);
-  return { root, colliders, monitors, pmMonitor, managerMonitor, hireMarkers, pmMarker, managerMarker, board, staffBoard, managerSign, sign, setTheme, setCutaway, chairs };
+  const elevators = new Elevators(walls, colliders);
+  return { root, colliders, monitors, pmMonitor, managerMonitor, hireMarkers, pmMarker, managerMarker, board, staffBoard, managerSign, sign, setTheme, setCutaway, chairs, walls, ceiling, elevators };
 }
 
 // ------------------------------------------------------------------ static merge
@@ -642,6 +672,7 @@ function placeDesk(slot: DeskSlot, parent: THREE.Group, placer: InstancedPlacer,
   const monitorM = deskM.clone().multiply(new THREE.Matrix4().compose(new THREE.Vector3(0, DESK_TOP, 0.18), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI), new THREE.Vector3(1, 1, 1)));
   const screenLocal = new THREE.Matrix4().makeTranslation(0, MONITOR_SCREEN.y, MONITOR_SCREEN.z + 0.004);
   screen.applyMatrix4(monitorM.clone().multiply(screenLocal));
+  screen.userData.rt = SCREEN_RT;
   parent.add(screen);
   drawScreenOff(mon.ctx);
   mon.texture.needsUpdate = true;
@@ -761,6 +792,8 @@ const deskTopGeo = rbox(1.5, 0.05, 0.74, 0.02);
 const legGeo = new THREE.BoxGeometry(0.05, 0.7, 0.05);
 const monitorGeo = rbox(0.62, 0.4, 0.04, 0.02);
 const screenGeo = new THREE.PlaneGeometry(0.57, 0.35);
+/** Monitor faces are lights in the ray tracer, coloured by whatever is on screen. */
+const SCREEN_RT = { emissive: 1.8, group: 2, light: true, liveMap: true, rough: 0.04, f0: 0.05 };
 const standGeo = new THREE.BoxGeometry(0.05, 0.16, 0.05);
 const keyboardGeo = rbox(0.4, 0.022, 0.13, 0.008);
 const mugGeo = new THREE.CylinderGeometry(0.04, 0.035, 0.09, 12);
@@ -781,6 +814,7 @@ function buildDesk(slot: DeskSlot, parent: THREE.Group, chairMat: THREE.Material
   const mon = makeCanvas(384, 240);
   const screen = new THREE.Mesh(screenGeo, new THREE.MeshBasicMaterial({ map: mon.texture, toneMapped: false }));
   screen.position.set(0, 1.05, 0.198);
+  screen.userData.rt = SCREEN_RT;
   screen.rotation.y = Math.PI;
   g.add(screen);
   g.add(mesh(keyboardGeo, toon("#f5f5f7"), { pos: [0, 0.755, -0.12] }));

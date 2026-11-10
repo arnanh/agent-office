@@ -23,10 +23,26 @@ const tmpM = new THREE.Matrix4();
 const tmpP = new THREE.Vector3();
 const ONE = new THREE.Vector3(1, 1, 1);
 
+/** A chair turned or sunk away from the pose the ray tracer baked it in. */
+export interface MovingChair {
+  /** Instance index, which is also the chair's id in the ray tracer's BVH. */
+  id: number;
+  /** Where the swivel axis is now (rest position plus seat sink). */
+  pivot: THREE.Vector3;
+  /** Yaw now, radians (the chair's own frame turned by this is world space). */
+  yaw: number;
+  /** Bounding sphere of the chair top, in world space. */
+  center: THREE.Vector3;
+  radius: number;
+}
+
 export class SwivelChairs {
   private meshes: THREE.InstancedMesh[] = [];
   private chairs: ChairState[] = [];
   private byDesk = new Map<number, number>();
+  /** Each chair facing its desk. The ray tracer bakes chairs in this pose (see `moving`). */
+  private readonly restMatrices: THREE.Matrix4[];
+  private readonly bound = new THREE.Sphere();
 
   constructor(top: Asset, slots: DeskSlot[], parent: THREE.Object3D) {
     slots.forEach((slot, i) => {
@@ -34,8 +50,17 @@ export class SwivelChairs {
       this.chairs.push({ pos: slot.pos.clone(), rest, yaw: rest, sink: 0, sinkVel: 0, dirty: true });
       this.byDesk.set(slot.index, i);
     });
+    this.restMatrices = this.chairs.map((c) => new THREE.Matrix4().compose(c.pos, new THREE.Quaternion().setFromAxisAngle(UP, c.rest), ONE));
+    const box = new THREE.Box3();
+    for (const part of top.parts) {
+      part.geometry.computeBoundingBox();
+      box.union(part.geometry.boundingBox!);
+    }
+    box.getBoundingSphere(this.bound);
+    this.bound.radius += 0.05;
     for (const part of top.parts) {
       const inst = new THREE.InstancedMesh(part.geometry, part.material, slots.length);
+      inst.userData.rtRest = this.restMatrices;
       inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       inst.castShadow = true;
       inst.receiveShadow = true;
@@ -84,6 +109,19 @@ export class SwivelChairs {
       }
     }
     this.flush();
+  }
+
+  /** Chairs away from their rest pose right now, for the ray tracer. */
+  moving(): MovingChair[] {
+    const out: MovingChair[] = [];
+    this.chairs.forEach((c, id) => {
+      const delta = angleDiff(c.yaw, c.rest);
+      if (Math.abs(delta) < 0.002 && Math.abs(c.sink) < 0.002) return;
+      const pivot = c.pos.clone().setY(c.pos.y + c.sink);
+      const center = this.bound.center.clone().applyAxisAngle(UP, c.yaw).add(pivot);
+      out.push({ id, pivot, yaw: c.yaw, center, radius: this.bound.radius });
+    });
+    return out;
   }
 
   private get(desk: number) {
